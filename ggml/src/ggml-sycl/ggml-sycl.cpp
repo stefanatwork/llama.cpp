@@ -91,6 +91,7 @@ int g_ggml_sycl_use_level_zero_api = 0;
 int g_ggml_sycl_enable_flash_attention = 1;
 int g_ggml_sycl_dev2dev_memcpy = DEV2DEV_MEMCPY_SYCL;
 int g_ggml_sycl_usm_system = 0;
+int g_ggml_sycl_use_host_usm = 0;
 
 static ggml_sycl_device_info ggml_sycl_init() {
     ggml_sycl_device_info info = {};
@@ -144,6 +145,7 @@ static ggml_sycl_device_info ggml_sycl_init() {
         info.devices[i].opt_feature.reorder = device.ext_oneapi_architecture_is(syclex::arch_category::intel_gpu);
         info.devices[i].smpbo = prop.get_local_mem_size();
         info.devices[i].warp_size = WARP_SIZE;
+        info.devices[i].usm_host_support = device.has(sycl::aspect::usm_host_allocations);
         info.devices[i].usm_system_support = device.has(sycl::aspect::usm_system_allocations);
 
         info.max_work_group_sizes[i] = prop.get_max_work_group_size();
@@ -288,6 +290,7 @@ static void ggml_check_sycl() try {
 #endif
 
         g_ggml_sycl_usm_system = ggml_sycl_get_env("GGML_SYCL_USM_SYSTEM", 0);
+        g_ggml_sycl_use_host_usm = ggml_sycl_get_env("GGML_SYCL_USE_HOST_USM", 0);
 
         GGML_SYCL_DEBUG("[SYCL] call ggml_check_sycl\n");
 
@@ -361,6 +364,7 @@ static void ggml_check_sycl() try {
 #endif
 
         GGML_LOG_INFO("  GGML_SYCL_USM_SYSTEM: %d\n", g_ggml_sycl_usm_system);
+        GGML_LOG_INFO("  GGML_SYCL_USE_HOST_USM: %d\n", g_ggml_sycl_use_host_usm);
 
 /* NOT REMOVE, keep it for next optimize for XMX.
 #if defined(SYCL_USE_XMX)
@@ -448,28 +452,41 @@ inline void free_aligned_mem_host(void * memblock) {
 // sycl buffer
 
 struct ggml_backend_sycl_buffer_context {
+    enum class memory_mode {
+        device,
+        host_usm,
+        system_usm,
+    };
+
     int device;
     void * dev_ptr = nullptr;
     queue_ptr stream;
     std::string name;
     optimize_feature opt_feature;
     std::vector<ggml_tensor_extra_gpu *> tensor_extras;
-    bool is_usm_system;
+    memory_mode mem_mode;
 
-    ggml_backend_sycl_buffer_context(int device, void * dev_ptr, queue_ptr stream, bool is_usm_system) :
-        device(device), dev_ptr(dev_ptr), stream(stream), is_usm_system(is_usm_system) {
+    ggml_backend_sycl_buffer_context(int device, void * dev_ptr, queue_ptr stream, memory_mode mem_mode) :
+        device(device), dev_ptr(dev_ptr), stream(stream), mem_mode(mem_mode) {
             check_allow_gpu_index(device);
             name = (GGML_SYCL_NAME + std::to_string(device));
             opt_feature = ggml_sycl_info().devices[device].opt_feature;
         }
 
+    bool is_host_visible() const {
+        return mem_mode != memory_mode::device;
+    }
+
     ~ggml_backend_sycl_buffer_context() {
         if (dev_ptr != nullptr) {
             ggml_sycl_set_device(device);
-            if (is_usm_system)
+            if (mem_mode == memory_mode::host_usm) {
+                SYCL_CHECK(CHECK_TRY_ERROR(sycl::free(dev_ptr, *stream)));
+            } else if (mem_mode == memory_mode::system_usm) {
                 free_aligned_mem_host(dev_ptr);
-            else
+            } else {
                 SYCL_CHECK(CHECK_TRY_ERROR(ggml_sycl_free_device(dev_ptr, *stream)));
+            }
         }
 
         //release extra used by tensors
@@ -560,6 +577,12 @@ static void ggml_backend_sycl_buffer_set_tensor(ggml_backend_buffer_t buffer,
     GGML_SYCL_DEBUG("%s", debug_get_tensor_str(": tensor", tensor).c_str());
     GGML_SYCL_DEBUG(" size=%zu offset=%zu\n", size, offset);
     ggml_backend_sycl_buffer_context * ctx = ( ggml_backend_sycl_buffer_context *)buffer->context;
+    if (ctx->is_host_visible()) {
+        ggml_sycl_set_device(ctx->device);
+        SYCL_CHECK(CHECK_TRY_ERROR(dpct::dev_mgr::instance().get_device(ctx->device).queues_wait_and_throw()));
+        memcpy((char *) tensor->data + offset, data, size);
+        return;
+    }
     ggml_sycl_set_device(ctx->device);
     auto stream = &(dpct::dev_mgr::instance().get_device(ctx->device).default_queue());
     SYCL_CHECK(CHECK_TRY_ERROR(dpct::dev_mgr::instance().get_device(ctx->device).queues_wait_and_throw()));
@@ -588,6 +611,13 @@ static void ggml_backend_sycl_buffer_get_tensor(ggml_backend_buffer_t buffer,
     GGML_SYCL_DEBUG("%s", debug_get_tensor_str(": tensor", tensor).c_str());
     GGML_SYCL_DEBUG(" size=%zu offset=%zu\n", size, offset);
     ggml_backend_sycl_buffer_context * ctx = ( ggml_backend_sycl_buffer_context *)buffer->context;
+
+    if (ctx->is_host_visible()) {
+        ggml_sycl_set_device(ctx->device);
+        SYCL_CHECK(CHECK_TRY_ERROR(dpct::dev_mgr::instance().get_device(ctx->device).queues_wait_and_throw()));
+        memcpy(data, (const char *)tensor->data + offset, size);
+        return;
+    }
 
     ggml_sycl_set_device(ctx->device);
     auto stream = dpct::dev_mgr::instance().get_device(ctx->device).default_queue();
@@ -664,6 +694,34 @@ ggml_backend_sycl_buffer_cpy_tensor(ggml_backend_buffer_t buffer,
     if (is_cpy_supported) {
         ggml_backend_sycl_buffer_context * src_ctx = (ggml_backend_sycl_buffer_context *)src->buffer->context;
         ggml_backend_sycl_buffer_context * dst_ctx = (ggml_backend_sycl_buffer_context *)dst->buffer->context;
+        size_t size = ggml_nbytes(src);
+
+        if (src_ctx->is_host_visible() && dst_ctx->is_host_visible()) {
+            ggml_sycl_set_device(src_ctx->device);
+            SYCL_CHECK(CHECK_TRY_ERROR(
+                dpct::dev_mgr::instance().get_device(src_ctx->device).queues_wait_and_throw()));
+            ggml_sycl_set_device(dst_ctx->device);
+            SYCL_CHECK(CHECK_TRY_ERROR(
+                dpct::dev_mgr::instance().get_device(dst_ctx->device).queues_wait_and_throw()));
+            memcpy(dst->data, src->data, size);
+            return true;
+        }
+
+        if (src_ctx->is_host_visible() && !dst_ctx->is_host_visible()) {
+            ggml_sycl_set_device(dst_ctx->device);
+            SYCL_CHECK(CHECK_TRY_ERROR(
+                dpct::dev_mgr::instance().get_device(dst_ctx->device).queues_wait_and_throw()));
+            SYCL_CHECK(CHECK_TRY_ERROR(dst_ctx->stream->memcpy(dst->data, src->data, size).wait()));
+            return true;
+        }
+
+        if (!src_ctx->is_host_visible() && dst_ctx->is_host_visible()) {
+            ggml_sycl_set_device(src_ctx->device);
+            SYCL_CHECK(CHECK_TRY_ERROR(
+                dpct::dev_mgr::instance().get_device(src_ctx->device).queues_wait_and_throw()));
+            SYCL_CHECK(CHECK_TRY_ERROR(src_ctx->stream->memcpy(dst->data, src->data, size).wait()));
+            return true;
+        }
 
         ggml_sycl_set_device(src_ctx->device);
         /*
@@ -689,7 +747,6 @@ ggml_backend_sycl_buffer_cpy_tensor(ggml_backend_buffer_t buffer,
 
         queue_ptr stream_dst = dst_ctx->stream;
         queue_ptr stream_src = src_ctx->stream;
-        size_t size = ggml_nbytes(src);
 
         //todo. it's dirty solutino to walkaroud known issue:device2device cross GPUs.
         dev2dev_memcpy(dst_ctx->device, *stream_dst, src_ctx->device, *stream_src, dst->data, src->data, size);
@@ -817,6 +874,19 @@ static bool check_usm_system(int device, size_t size) {
     return use_usm_system;
 }
 
+static bool check_host_usm(int device) {
+    if (!g_ggml_sycl_use_host_usm) {
+        return false;
+    }
+
+    if (!ggml_sycl_info().devices[device].usm_host_support) {
+        GGML_LOG_WARN("Device does not support USM host allocations\n");
+        return false;
+    }
+
+    return true;
+}
+
 inline void * aligned_malloc_host(size_t alignment, size_t size) {
 #ifdef _WIN32
     return _aligned_malloc(size, alignment);
@@ -842,15 +912,25 @@ ggml_backend_sycl_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buft,
      */
     size_t alignment = MEM_SIZE_2M;
     size_t aligned_size = ((size + alignment - 1) / alignment) * alignment;
+    bool use_host_usm = check_host_usm(buft_ctx->device);
     bool use_usm_system = check_usm_system(buft_ctx->device, aligned_size);
 
     void * dev_ptr;
-    if (use_usm_system) {
+    ggml_backend_sycl_buffer_context::memory_mode mem_mode = ggml_backend_sycl_buffer_context::memory_mode::device;
+    if (use_host_usm) {
+        SYCL_CHECK(CHECK_TRY_ERROR(dev_ptr = (void *) sycl::malloc_host(aligned_size, *stream)));
+        if (!dev_ptr) {
+            GGML_LOG_ERROR("%s: can't allocate %lu Bytes of USM host memory\n", __func__, size);
+            return nullptr;
+        }
+        mem_mode = ggml_backend_sycl_buffer_context::memory_mode::host_usm;
+    } else if (use_usm_system) {
         dev_ptr = (void *)aligned_malloc_host(alignment, aligned_size);
         if (!dev_ptr) {
             GGML_LOG_ERROR("%s: can't allocate %lu Bytes of memory on host\n", __func__, size);
             return nullptr;
         }
+        mem_mode = ggml_backend_sycl_buffer_context::memory_mode::system_usm;
     } else {
         SYCL_CHECK(CHECK_TRY_ERROR(dev_ptr = (void *)ggml_sycl_malloc_device(size, *stream)));
         if (!dev_ptr) {
@@ -858,7 +938,7 @@ ggml_backend_sycl_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buft,
           return nullptr;
         }
     }
-    ggml_backend_sycl_buffer_context * ctx = new  ggml_backend_sycl_buffer_context(buft_ctx->device, dev_ptr, buft_ctx->stream, use_usm_system);
+    ggml_backend_sycl_buffer_context * ctx = new  ggml_backend_sycl_buffer_context(buft_ctx->device, dev_ptr, buft_ctx->stream, mem_mode);
     return ggml_backend_buffer_init(buft, ggml_backend_sycl_buffer_interface, ctx, size);
 }
 catch (sycl::exception const &exc) {
@@ -2330,7 +2410,8 @@ static dpct::err0 ggml_sycl_cpy_tensor_2d(void *dst,
     } else if (ggml_backend_buffer_is_sycl(src->buffer)) {
         // If buffer is a SYCL buffer
         //GGML_SYCL_DEBUG("%s: SYCL buffer type src tensor\n", __func__);
-        kind    = dpct::device_to_device;
+        ggml_backend_sycl_buffer_context * src_ctx = (ggml_backend_sycl_buffer_context *)src->buffer->context;
+        kind = src_ctx->is_host_visible() ? dpct::host_to_device : dpct::device_to_device;
         src_ptr = (char *) src->data;
     } else if (ggml_backend_buffer_is_sycl_split(src->buffer)) {
         /*
@@ -5055,6 +5136,13 @@ static void ggml_backend_sycl_set_tensor_async(ggml_backend_t backend,
     ggml_backend_buffer_t buf = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
 
     GGML_ASSERT(buf->buft == ggml_backend_sycl_buffer_type(sycl_ctx->device) && "unsupported buffer type");
+    ggml_backend_sycl_buffer_context * buf_ctx = (ggml_backend_sycl_buffer_context *)buf->context;
+    if (buf_ctx->is_host_visible()) {
+        ggml_sycl_set_device(buf_ctx->device);
+        SYCL_CHECK(CHECK_TRY_ERROR(dpct::dev_mgr::instance().get_device(buf_ctx->device).queues_wait_and_throw()));
+        memcpy((char *)tensor->data + offset, data, size);
+        return;
+    }
     const queue_ptr stream = sycl_ctx->stream(sycl_ctx->device, 0);
     SYCL_CHECK(CHECK_TRY_ERROR(
         (stream)->memcpy((char *)tensor->data + offset, data, size)));
@@ -5076,6 +5164,13 @@ static void ggml_backend_sycl_get_tensor_async(ggml_backend_t backend,
     ggml_backend_buffer_t buf = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
 
     GGML_ASSERT(buf->buft == ggml_backend_sycl_buffer_type(sycl_ctx->device) && "unsupported buffer type");
+    ggml_backend_sycl_buffer_context * buf_ctx = (ggml_backend_sycl_buffer_context *)buf->context;
+    if (buf_ctx->is_host_visible()) {
+        ggml_sycl_set_device(buf_ctx->device);
+        SYCL_CHECK(CHECK_TRY_ERROR(dpct::dev_mgr::instance().get_device(buf_ctx->device).queues_wait_and_throw()));
+        memcpy(data, (const char *)tensor->data + offset, size);
+        return;
+    }
     const queue_ptr stream = sycl_ctx->stream(sycl_ctx->device, 0);
     SYCL_CHECK(CHECK_TRY_ERROR((stream)->memcpy(
         data, (const char *)tensor->data + offset, size)));
@@ -5097,14 +5192,34 @@ static bool ggml_backend_sycl_cpy_tensor_async(ggml_backend_t backend,
     GGML_SYCL_DEBUG("%s", debug_get_tensor_str(" src", src).c_str());
     GGML_SYCL_DEBUG(" is_cpy_supported=%d\n", is_cpy_supported);
     if (is_cpy_supported) {
-        /*
-        DPCT1009:215: SYCL uses exceptions to report errors and does not use the
-        error codes. The original code was commented out and a warning string
-        was inserted. You need to rewrite this code.
-        */
-        const queue_ptr stream = sycl_ctx->stream(sycl_ctx->device, 0);
-        SYCL_CHECK(CHECK_TRY_ERROR((stream)->memcpy(
-            dst->data, src->data, ggml_nbytes(dst))));
+        ggml_backend_sycl_buffer_context * src_ctx = (ggml_backend_sycl_buffer_context *)src->buffer->context;
+        ggml_backend_sycl_buffer_context * dst_ctx = (ggml_backend_sycl_buffer_context *)dst->buffer->context;
+        size_t size = ggml_nbytes(dst);
+
+        if (src_ctx->is_host_visible() && dst_ctx->is_host_visible()) {
+            ggml_sycl_set_device(src_ctx->device);
+            SYCL_CHECK(CHECK_TRY_ERROR(
+                dpct::dev_mgr::instance().get_device(src_ctx->device).queues_wait_and_throw()));
+            ggml_sycl_set_device(dst_ctx->device);
+            SYCL_CHECK(CHECK_TRY_ERROR(
+                dpct::dev_mgr::instance().get_device(dst_ctx->device).queues_wait_and_throw()));
+            memcpy(dst->data, src->data, size);
+            return true;
+        }
+
+        if (src_ctx->is_host_visible() && !dst_ctx->is_host_visible()) {
+            SYCL_CHECK(CHECK_TRY_ERROR(dst_ctx->stream->memcpy(dst->data, src->data, size)));
+            return true;
+        }
+
+        if (!src_ctx->is_host_visible() && dst_ctx->is_host_visible()) {
+            SYCL_CHECK(CHECK_TRY_ERROR(src_ctx->stream->memcpy(dst->data, src->data, size)));
+            return true;
+        }
+
+        queue_ptr stream_dst = dst_ctx->stream;
+        queue_ptr stream_src = src_ctx->stream;
+        dev2dev_memcpy(dst_ctx->device, *stream_dst, src_ctx->device, *stream_src, dst->data, src->data, size);
         return true;
     }
 

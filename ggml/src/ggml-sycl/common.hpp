@@ -236,6 +236,7 @@ struct sycl_device_info {
     size_t  total_vram;
     sycl_hw_info hw_info;
     optimize_feature opt_feature;
+    bool    usm_host_support;   // support for USM host allocations
     bool    usm_system_support; // support for USM system allocations
 };
 
