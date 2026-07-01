@@ -319,8 +319,15 @@ struct ggml_sycl_pool_alloc {
 // backend interface
 
 struct ggml_tensor_extra_gpu {
+    enum class alloc_kind : uint8_t {
+        none = 0,
+        device,
+        shared_usm,
+    };
+
   void* data_device[GGML_SYCL_MAX_DEVICES]; // 1 pointer for each device for split
                                        // tensors
+    alloc_kind data_alloc_kind[GGML_SYCL_MAX_DEVICES];
   dpct::event_ptr events[GGML_SYCL_MAX_DEVICES]
                         [GGML_SYCL_MAX_STREAMS]; // events for synchronizing multiple GPUs
   optimize_feature optimized_feature;

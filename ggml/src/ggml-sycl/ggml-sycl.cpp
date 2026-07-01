@@ -1202,7 +1202,13 @@ ggml_backend_sycl_split_buffer_init_tensor(ggml_backend_buffer_t buffer,
         ggml_sycl_set_device(i);
         const queue_ptr stream = ctx->streams[i];
         char * buf;
-        SYCL_CHECK(CHECK_TRY_ERROR(buf = (char *)ggml_sycl_malloc_device(size, *stream)));
+        if (check_host_usm(i)) {
+            SYCL_CHECK(CHECK_TRY_ERROR(buf = (char *)sycl::malloc_shared(size, *stream)));
+            extra->data_alloc_kind[i] = ggml_tensor_extra_gpu::alloc_kind::shared_usm;
+        } else {
+            SYCL_CHECK(CHECK_TRY_ERROR(buf = (char *)ggml_sycl_malloc_device(size, *stream)));
+            extra->data_alloc_kind[i] = ggml_tensor_extra_gpu::alloc_kind::device;
+        }
         if (!buf) {
             char err_buf[1024];
             snprintf(err_buf, 1023, "%s: can't allocate %lu Bytes of memory on device\n", __func__, size);
