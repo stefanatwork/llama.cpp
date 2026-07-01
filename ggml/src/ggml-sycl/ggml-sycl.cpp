@@ -603,13 +603,13 @@ static void ggml_backend_sycl_buffer_set_tensor(ggml_backend_buffer_t buffer,
     ggml_backend_sycl_buffer_context * ctx = ( ggml_backend_sycl_buffer_context *)buffer->context;
     if (ctx->is_host_visible()) {
         ggml_sycl_set_device(ctx->device);
-        SYCL_CHECK(CHECK_TRY_ERROR(dpct::dev_mgr::instance().get_device(ctx->device).queues_wait_and_throw()));
+        SYCL_CHECK(CHECK_TRY_ERROR(ctx->stream->wait_and_throw()));
         memcpy((char *) tensor->data + offset, data, size);
         return;
     }
     ggml_sycl_set_device(ctx->device);
     auto stream = &(dpct::dev_mgr::instance().get_device(ctx->device).default_queue());
-    SYCL_CHECK(CHECK_TRY_ERROR(dpct::dev_mgr::instance().get_device(ctx->device).queues_wait_and_throw()));
+    SYCL_CHECK(CHECK_TRY_ERROR(stream->wait_and_throw()));
 #ifndef _WIN32
     // Note: Use host buffer to save the data from mmap(), then copy to device. It's workaround for mmap() issue on PVC GPU.
     // This function will be called during load model from disk. Use memory buffer replace dynamic won't save more time and brings potential memory leak risk here.
@@ -638,7 +638,7 @@ static void ggml_backend_sycl_buffer_get_tensor(ggml_backend_buffer_t buffer,
 
     if (ctx->is_host_visible()) {
         ggml_sycl_set_device(ctx->device);
-        SYCL_CHECK(CHECK_TRY_ERROR(dpct::dev_mgr::instance().get_device(ctx->device).queues_wait_and_throw()));
+        SYCL_CHECK(CHECK_TRY_ERROR(ctx->stream->wait_and_throw()));
         memcpy(data, (const char *)tensor->data + offset, size);
         return;
     }
@@ -722,27 +722,23 @@ ggml_backend_sycl_buffer_cpy_tensor(ggml_backend_buffer_t buffer,
 
         if (src_ctx->is_host_visible() && dst_ctx->is_host_visible()) {
             ggml_sycl_set_device(src_ctx->device);
-            SYCL_CHECK(CHECK_TRY_ERROR(
-                dpct::dev_mgr::instance().get_device(src_ctx->device).queues_wait_and_throw()));
+            SYCL_CHECK(CHECK_TRY_ERROR(src_ctx->stream->wait_and_throw()));
             ggml_sycl_set_device(dst_ctx->device);
-            SYCL_CHECK(CHECK_TRY_ERROR(
-                dpct::dev_mgr::instance().get_device(dst_ctx->device).queues_wait_and_throw()));
+            SYCL_CHECK(CHECK_TRY_ERROR(dst_ctx->stream->wait_and_throw()));
             memcpy(dst->data, src->data, size);
             return true;
         }
 
         if (src_ctx->is_host_visible() && !dst_ctx->is_host_visible()) {
             ggml_sycl_set_device(dst_ctx->device);
-            SYCL_CHECK(CHECK_TRY_ERROR(
-                dpct::dev_mgr::instance().get_device(dst_ctx->device).queues_wait_and_throw()));
+            SYCL_CHECK(CHECK_TRY_ERROR(dst_ctx->stream->wait_and_throw()));
             SYCL_CHECK(CHECK_TRY_ERROR(dst_ctx->stream->memcpy(dst->data, src->data, size).wait()));
             return true;
         }
 
         if (!src_ctx->is_host_visible() && dst_ctx->is_host_visible()) {
             ggml_sycl_set_device(src_ctx->device);
-            SYCL_CHECK(CHECK_TRY_ERROR(
-                dpct::dev_mgr::instance().get_device(src_ctx->device).queues_wait_and_throw()));
+            SYCL_CHECK(CHECK_TRY_ERROR(src_ctx->stream->wait_and_throw()));
             SYCL_CHECK(CHECK_TRY_ERROR(src_ctx->stream->memcpy(dst->data, src->data, size).wait()));
             return true;
         }
@@ -753,16 +749,14 @@ ggml_backend_sycl_buffer_cpy_tensor(ggml_backend_buffer_t buffer,
         error codes. The original code was commented out and a warning string
         was inserted. You need to rewrite this code.
         */
-        SYCL_CHECK(CHECK_TRY_ERROR(
-            dpct::dev_mgr::instance().get_device(src_ctx->device).queues_wait_and_throw()));
+        SYCL_CHECK(CHECK_TRY_ERROR(src_ctx->stream->wait_and_throw()));
         ggml_sycl_set_device(dst_ctx->device);
         /*
         DPCT1009:199: SYCL uses exceptions to report errors and does not use the
         error codes. The original code was commented out and a warning string
         was inserted. You need to rewrite this code.
         */
-        SYCL_CHECK(CHECK_TRY_ERROR(
-            dpct::dev_mgr::instance().get_device(dst_ctx->device).queues_wait_and_throw()));
+        SYCL_CHECK(CHECK_TRY_ERROR(dst_ctx->stream->wait_and_throw()));
         /*
         DPCT1009:200: SYCL uses exceptions to report errors and does not use the
         error codes. The original code was commented out and a warning string
@@ -804,8 +798,7 @@ static void ggml_backend_sycl_buffer_clear(ggml_backend_buffer_t buffer,
 
     ggml_sycl_set_device(ctx->device);
     queue_ptr stream = ctx->stream;
-    SYCL_CHECK(
-        CHECK_TRY_ERROR(dpct::get_current_device().queues_wait_and_throw()));
+    SYCL_CHECK(CHECK_TRY_ERROR(stream->wait_and_throw()));
 
     constexpr size_t MAX_CHUNK = 2ULL << 30;  // 2 GiB
     for (size_t off = 0; off < buffer->size; off += MAX_CHUNK) {
