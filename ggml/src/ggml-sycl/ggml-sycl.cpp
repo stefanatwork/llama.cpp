@@ -147,7 +147,7 @@ static ggml_sycl_device_info ggml_sycl_init() {
         info.devices[i].smpbo = prop.get_local_mem_size();
         info.devices[i].warp_size = WARP_SIZE;
         info.devices[i].shared_memory_gpu = device.get_info<sycl::info::device::host_unified_memory>();
-        info.devices[i].usm_host_support = device.has(sycl::aspect::usm_host_allocations);
+        info.devices[i].usm_shared_support = device.has(sycl::aspect::usm_shared_allocations);
         info.devices[i].usm_system_support = device.has(sycl::aspect::usm_system_allocations);
 
         info.max_work_group_sizes[i] = prop.get_max_work_group_size();
@@ -305,7 +305,7 @@ static void ggml_check_sycl() try {
             g_ggml_sycl_use_host_usm_auto = 0;
             for (int i = 0; i < ggml_sycl_info().device_count; ++i) {
                 const auto & dev = ggml_sycl_info().devices[i];
-                if (dev.shared_memory_gpu && dev.usm_host_support) {
+                if (dev.shared_memory_gpu && dev.usm_shared_support) {
                     g_ggml_sycl_use_host_usm = 1;
                     g_ggml_sycl_use_host_usm_auto = 1;
                     break;
@@ -903,8 +903,8 @@ static bool check_host_usm(int device) {
         return false;
     }
 
-    if (!ggml_sycl_info().devices[device].usm_host_support) {
-        GGML_LOG_WARN("Device does not support USM host allocations\n");
+    if (!ggml_sycl_info().devices[device].usm_shared_support) {
+        GGML_LOG_WARN("Device does not support USM shared allocations\n");
         return false;
     }
 
@@ -942,9 +942,9 @@ ggml_backend_sycl_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buft,
     void * dev_ptr;
     ggml_backend_sycl_buffer_context::memory_mode mem_mode = ggml_backend_sycl_buffer_context::memory_mode::device;
     if (use_host_usm) {
-        SYCL_CHECK(CHECK_TRY_ERROR(dev_ptr = (void *) sycl::malloc_host(aligned_size, *stream)));
+        SYCL_CHECK(CHECK_TRY_ERROR(dev_ptr = (void *) sycl::malloc_shared(aligned_size, *stream)));
         if (!dev_ptr) {
-            GGML_LOG_ERROR("%s: can't allocate %lu Bytes of USM host memory\n", __func__, size);
+            GGML_LOG_ERROR("%s: can't allocate %lu Bytes of USM shared memory\n", __func__, size);
             return nullptr;
         }
         mem_mode = ggml_backend_sycl_buffer_context::memory_mode::host_usm;
@@ -1639,13 +1639,13 @@ struct ggml_sycl_pool_leg : public ggml_sycl_pool {
         size_t look_ahead_size = (size_t) (1.05 * size);
 
         if (use_host_usm) {
-            SYCL_CHECK(CHECK_TRY_ERROR(ptr = (void *)sycl::malloc_host(look_ahead_size, *qptr)));
+            SYCL_CHECK(CHECK_TRY_ERROR(ptr = (void *)sycl::malloc_shared(look_ahead_size, *qptr)));
         } else {
             SYCL_CHECK(CHECK_TRY_ERROR(ptr = (void *)ggml_sycl_malloc_device(look_ahead_size, *qptr)));
         }
         if (!ptr) {
             GGML_LOG_ERROR("%s: can't allocate %lu Bytes of memory on %s\n", __func__, look_ahead_size,
-                           use_host_usm ? "host USM" : "device/GPU");
+                           use_host_usm ? "shared USM" : "device/GPU");
             return nullptr;
         }
 
@@ -3695,9 +3695,9 @@ static bool ggml_sycl_supports_dmmv(enum ggml_type type) {
 // Helper functions to unify device memory allocation for both async and sync paths
 static inline void * sycl_ext_malloc_device(dpct::queue_ptr stream, size_t size) {
     const bool use_host_usm =
-        g_ggml_sycl_use_host_usm && stream->get_device().has(sycl::aspect::usm_host_allocations);
+        g_ggml_sycl_use_host_usm && stream->get_device().has(sycl::aspect::usm_shared_allocations);
     if (use_host_usm) {
-        return sycl::malloc_host(size, *stream);
+        return sycl::malloc_shared(size, *stream);
     }
 
     bool use_async = g_ggml_sycl_use_async_mem_op;
@@ -3714,7 +3714,7 @@ static inline void * sycl_ext_malloc_device(dpct::queue_ptr stream, size_t size)
 
 static inline void sycl_ext_free(dpct::queue_ptr stream, void * ptr) {
     const bool use_host_usm =
-        g_ggml_sycl_use_host_usm && stream->get_device().has(sycl::aspect::usm_host_allocations);
+        g_ggml_sycl_use_host_usm && stream->get_device().has(sycl::aspect::usm_shared_allocations);
     if (use_host_usm) {
         SYCL_CHECK(CHECK_TRY_ERROR(sycl::free(ptr, *stream)));
         return;
