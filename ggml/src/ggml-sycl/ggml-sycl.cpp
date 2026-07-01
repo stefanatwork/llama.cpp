@@ -92,6 +92,7 @@ int g_ggml_sycl_enable_flash_attention = 1;
 int g_ggml_sycl_dev2dev_memcpy = DEV2DEV_MEMCPY_SYCL;
 int g_ggml_sycl_usm_system = 0;
 int g_ggml_sycl_use_host_usm = 0;
+int g_ggml_sycl_use_host_usm_auto = 0;
 
 static ggml_sycl_device_info ggml_sycl_init() {
     ggml_sycl_device_info info = {};
@@ -145,6 +146,7 @@ static ggml_sycl_device_info ggml_sycl_init() {
         info.devices[i].opt_feature.reorder = device.ext_oneapi_architecture_is(syclex::arch_category::intel_gpu);
         info.devices[i].smpbo = prop.get_local_mem_size();
         info.devices[i].warp_size = WARP_SIZE;
+        info.devices[i].shared_memory_gpu = device.get_info<sycl::info::device::host_unified_memory>();
         info.devices[i].usm_host_support = device.has(sycl::aspect::usm_host_allocations);
         info.devices[i].usm_system_support = device.has(sycl::aspect::usm_system_allocations);
 
@@ -166,6 +168,9 @@ static ggml_sycl_device_info ggml_sycl_init() {
             props.stype = ZE_STRUCTURE_TYPE_DEVICE_PROPERTIES;
             ze_result_t r = zeDeviceGetProperties(ze_dev, &props);
             info.devices[i].l0_discrete_gpu = r == ZE_RESULT_SUCCESS && !(props.flags & ZE_DEVICE_PROPERTY_FLAG_INTEGRATED);
+            if (r == ZE_RESULT_SUCCESS && (props.flags & ZE_DEVICE_PROPERTY_FLAG_INTEGRATED)) {
+                info.devices[i].shared_memory_gpu = true;
+            }
         }
 #endif
     }
@@ -290,7 +295,23 @@ static void ggml_check_sycl() try {
 #endif
 
         g_ggml_sycl_usm_system = ggml_sycl_get_env("GGML_SYCL_USM_SYSTEM", 0);
-        g_ggml_sycl_use_host_usm = ggml_sycl_get_env("GGML_SYCL_USE_HOST_USM", 0);
+
+        const char * host_usm_env = getenv("GGML_SYCL_USE_HOST_USM");
+        if (host_usm_env != nullptr) {
+            g_ggml_sycl_use_host_usm = ggml_sycl_get_env("GGML_SYCL_USE_HOST_USM", 0);
+            g_ggml_sycl_use_host_usm_auto = 0;
+        } else {
+            g_ggml_sycl_use_host_usm = 0;
+            g_ggml_sycl_use_host_usm_auto = 0;
+            for (int i = 0; i < ggml_sycl_info().device_count; ++i) {
+                const auto & dev = ggml_sycl_info().devices[i];
+                if (dev.shared_memory_gpu && dev.usm_host_support) {
+                    g_ggml_sycl_use_host_usm = 1;
+                    g_ggml_sycl_use_host_usm_auto = 1;
+                    break;
+                }
+            }
+        }
 
         GGML_SYCL_DEBUG("[SYCL] call ggml_check_sycl\n");
 
@@ -365,6 +386,9 @@ static void ggml_check_sycl() try {
 
         GGML_LOG_INFO("  GGML_SYCL_USM_SYSTEM: %d\n", g_ggml_sycl_usm_system);
         GGML_LOG_INFO("  GGML_SYCL_USE_HOST_USM: %d\n", g_ggml_sycl_use_host_usm);
+        if (g_ggml_sycl_use_host_usm_auto) {
+            GGML_LOG_INFO("  GGML_SYCL_USE_HOST_USM: auto-enabled for integrated/shared-memory GPU\n");
+        }
 
 /* NOT REMOVE, keep it for next optimize for XMX.
 #if defined(SYCL_USE_XMX)
@@ -1509,6 +1533,7 @@ struct ggml_sycl_pool_leg : public ggml_sycl_pool {
 
     int device;
     queue_ptr qptr;
+    bool use_host_usm;
     struct ggml_sycl_buffer {
         void * ptr = nullptr;
         size_t size = 0;
@@ -1517,7 +1542,8 @@ struct ggml_sycl_pool_leg : public ggml_sycl_pool {
     ggml_sycl_buffer buffer_pool[MAX_SYCL_BUFFERS] = {};
     size_t pool_size = 0;
 
-    explicit ggml_sycl_pool_leg(queue_ptr qptr_, int device_) : device(device_), qptr(qptr_) {}
+    explicit ggml_sycl_pool_leg(queue_ptr qptr_, int device_, bool use_host_usm_) :
+        device(device_), qptr(qptr_), use_host_usm(use_host_usm_) {}
 
     ~ggml_sycl_pool_leg() {
 #ifdef DEBUG_SYCL_POOL
@@ -1540,7 +1566,11 @@ struct ggml_sycl_pool_leg : public ggml_sycl_pool {
         for (int i = 0; i < MAX_SYCL_BUFFERS; ++i) {
             ggml_sycl_buffer & b = buffer_pool[i];
             if (b.ptr != nullptr) {
-                SYCL_CHECK(CHECK_TRY_ERROR(ggml_sycl_free_device(b.ptr, *qptr)));
+                if (use_host_usm) {
+                    SYCL_CHECK(CHECK_TRY_ERROR(sycl::free(b.ptr, *qptr)));
+                } else {
+                    SYCL_CHECK(CHECK_TRY_ERROR(ggml_sycl_free_device(b.ptr, *qptr)));
+                }
                 pool_size -= b.size;
             }
         }
@@ -1608,9 +1638,14 @@ struct ggml_sycl_pool_leg : public ggml_sycl_pool {
         void * ptr;
         size_t look_ahead_size = (size_t) (1.05 * size);
 
-        SYCL_CHECK(CHECK_TRY_ERROR(ptr = (void *)ggml_sycl_malloc_device(look_ahead_size, *qptr)));
+        if (use_host_usm) {
+            SYCL_CHECK(CHECK_TRY_ERROR(ptr = (void *)sycl::malloc_host(look_ahead_size, *qptr)));
+        } else {
+            SYCL_CHECK(CHECK_TRY_ERROR(ptr = (void *)ggml_sycl_malloc_device(look_ahead_size, *qptr)));
+        }
         if (!ptr) {
-            GGML_LOG_ERROR("%s: can't allocate %lu Bytes of memory on device/GPU\n", __func__, look_ahead_size);
+            GGML_LOG_ERROR("%s: can't allocate %lu Bytes of memory on %s\n", __func__, look_ahead_size,
+                           use_host_usm ? "host USM" : "device/GPU");
             return nullptr;
         }
 
@@ -1636,7 +1671,11 @@ struct ggml_sycl_pool_leg : public ggml_sycl_pool {
             }
         }
         GGML_LOG_WARN("WARNING: sycl buffer pool full, increase MAX_sycl_BUFFERS\n");
-        SYCL_CHECK(CHECK_TRY_ERROR(ggml_sycl_free_device(ptr, *qptr)));
+        if (use_host_usm) {
+            SYCL_CHECK(CHECK_TRY_ERROR(sycl::free(ptr, *qptr)));
+        } else {
+            SYCL_CHECK(CHECK_TRY_ERROR(ggml_sycl_free_device(ptr, *qptr)));
+        }
         pool_size -= size;
     }
 };
@@ -1836,12 +1875,15 @@ std::unique_ptr<ggml_sycl_pool> ggml_backend_sycl_context::new_pool_for_host(que
 }
 
 std::unique_ptr<ggml_sycl_pool> ggml_backend_sycl_context::new_pool_for_device(queue_ptr qptr, int device) {
+    if (check_host_usm(device)) {
+        return std::unique_ptr<ggml_sycl_pool>(new ggml_sycl_pool_leg(qptr, device, true));
+    }
 #if defined(GGML_SYCL_USE_VMM)
     if (g_ggml_sycl_enable_vmm && ggml_sycl_info().devices[device].vmm) {
         return std::unique_ptr<ggml_sycl_pool>(new ggml_sycl_pool_vmm(qptr, device));
     }
 #endif // defined(GGML_SYCL_USE_VMM)
-    return std::unique_ptr<ggml_sycl_pool>(new ggml_sycl_pool_leg(qptr, device));
+    return std::unique_ptr<ggml_sycl_pool>(new ggml_sycl_pool_leg(qptr, device, false));
 }
 
 
@@ -3652,6 +3694,12 @@ static bool ggml_sycl_supports_dmmv(enum ggml_type type) {
 
 // Helper functions to unify device memory allocation for both async and sync paths
 static inline void * sycl_ext_malloc_device(dpct::queue_ptr stream, size_t size) {
+    const bool use_host_usm =
+        g_ggml_sycl_use_host_usm && stream->get_device().has(sycl::aspect::usm_host_allocations);
+    if (use_host_usm) {
+        return sycl::malloc_host(size, *stream);
+    }
+
     bool use_async = g_ggml_sycl_use_async_mem_op;
 #if defined(GGML_SYCL_GRAPH) && SYCL_EXT_ONEAPI_ASYNC_MEMORY_ALLOC
     if (use_async) {
@@ -3665,6 +3713,13 @@ static inline void * sycl_ext_malloc_device(dpct::queue_ptr stream, size_t size)
 }
 
 static inline void sycl_ext_free(dpct::queue_ptr stream, void * ptr) {
+    const bool use_host_usm =
+        g_ggml_sycl_use_host_usm && stream->get_device().has(sycl::aspect::usm_host_allocations);
+    if (use_host_usm) {
+        SYCL_CHECK(CHECK_TRY_ERROR(sycl::free(ptr, *stream)));
+        return;
+    }
+
     bool use_async = g_ggml_sycl_use_async_mem_op;
 #if defined(GGML_SYCL_GRAPH) && SYCL_EXT_ONEAPI_ASYNC_MEMORY_ALLOC
     if (use_async) {
@@ -5136,14 +5191,13 @@ static void ggml_backend_sycl_set_tensor_async(ggml_backend_t backend,
     ggml_backend_buffer_t buf = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
 
     GGML_ASSERT(buf->buft == ggml_backend_sycl_buffer_type(sycl_ctx->device) && "unsupported buffer type");
+    const queue_ptr stream = sycl_ctx->stream(sycl_ctx->device, 0);
     ggml_backend_sycl_buffer_context * buf_ctx = (ggml_backend_sycl_buffer_context *)buf->context;
     if (buf_ctx->is_host_visible()) {
-        ggml_sycl_set_device(buf_ctx->device);
-        SYCL_CHECK(CHECK_TRY_ERROR(dpct::dev_mgr::instance().get_device(buf_ctx->device).queues_wait_and_throw()));
-        memcpy((char *)tensor->data + offset, data, size);
+        SYCL_CHECK(CHECK_TRY_ERROR(
+            (stream)->memcpy((char *)tensor->data + offset, data, size)));
         return;
     }
-    const queue_ptr stream = sycl_ctx->stream(sycl_ctx->device, 0);
     SYCL_CHECK(CHECK_TRY_ERROR(
         (stream)->memcpy((char *)tensor->data + offset, data, size)));
 }
@@ -5164,14 +5218,13 @@ static void ggml_backend_sycl_get_tensor_async(ggml_backend_t backend,
     ggml_backend_buffer_t buf = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
 
     GGML_ASSERT(buf->buft == ggml_backend_sycl_buffer_type(sycl_ctx->device) && "unsupported buffer type");
+    const queue_ptr stream = sycl_ctx->stream(sycl_ctx->device, 0);
     ggml_backend_sycl_buffer_context * buf_ctx = (ggml_backend_sycl_buffer_context *)buf->context;
     if (buf_ctx->is_host_visible()) {
-        ggml_sycl_set_device(buf_ctx->device);
-        SYCL_CHECK(CHECK_TRY_ERROR(dpct::dev_mgr::instance().get_device(buf_ctx->device).queues_wait_and_throw()));
-        memcpy(data, (const char *)tensor->data + offset, size);
+        SYCL_CHECK(CHECK_TRY_ERROR((stream)->memcpy(
+            data, (const char *)tensor->data + offset, size)));
         return;
     }
-    const queue_ptr stream = sycl_ctx->stream(sycl_ctx->device, 0);
     SYCL_CHECK(CHECK_TRY_ERROR((stream)->memcpy(
         data, (const char *)tensor->data + offset, size)));
 }
@@ -5197,13 +5250,7 @@ static bool ggml_backend_sycl_cpy_tensor_async(ggml_backend_t backend,
         size_t size = ggml_nbytes(dst);
 
         if (src_ctx->is_host_visible() && dst_ctx->is_host_visible()) {
-            ggml_sycl_set_device(src_ctx->device);
-            SYCL_CHECK(CHECK_TRY_ERROR(
-                dpct::dev_mgr::instance().get_device(src_ctx->device).queues_wait_and_throw()));
-            ggml_sycl_set_device(dst_ctx->device);
-            SYCL_CHECK(CHECK_TRY_ERROR(
-                dpct::dev_mgr::instance().get_device(dst_ctx->device).queues_wait_and_throw()));
-            memcpy(dst->data, src->data, size);
+            SYCL_CHECK(CHECK_TRY_ERROR(dst_ctx->stream->memcpy(dst->data, src->data, size)));
             return true;
         }
 
