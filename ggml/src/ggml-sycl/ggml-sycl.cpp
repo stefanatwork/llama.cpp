@@ -1285,10 +1285,15 @@ ggml_backend_sycl_split_buffer_set_tensor(ggml_backend_buffer_t buffer,
         */
         ggml_sycl_set_device(i);
         const queue_ptr stream = ctx->streams[i];
-        SYCL_CHECK(CHECK_TRY_ERROR(
-            (*stream)
-                .memcpy(extra->data_device[i], buf_host, original_size)
-                .wait()));
+        if (extra->data_alloc_kind[i] == ggml_tensor_extra_gpu::alloc_kind::shared_usm) {
+            SYCL_CHECK(CHECK_TRY_ERROR(stream->wait_and_throw()));
+            memcpy(extra->data_device[i], buf_host, original_size);
+        } else {
+            SYCL_CHECK(CHECK_TRY_ERROR(
+                (*stream)
+                    .memcpy(extra->data_device[i], buf_host, original_size)
+                    .wait()));
+        }
     }
 }
 catch (sycl::exception const &exc) {
@@ -1341,10 +1346,15 @@ ggml_backend_sycl_split_buffer_get_tensor(ggml_backend_buffer_t buffer,
         */
         ggml_sycl_set_device(i);
         const queue_ptr stream = ctx->streams[i];
-        SYCL_CHECK(CHECK_TRY_ERROR(
-            (*stream)
-                .memcpy(buf_host, extra->data_device[i], original_size)
-                .wait()));
+        if (extra->data_alloc_kind[i] == ggml_tensor_extra_gpu::alloc_kind::shared_usm) {
+            SYCL_CHECK(CHECK_TRY_ERROR(stream->wait_and_throw()));
+            memcpy(buf_host, extra->data_device[i], original_size);
+        } else {
+            SYCL_CHECK(CHECK_TRY_ERROR(
+                (*stream)
+                    .memcpy(buf_host, extra->data_device[i], original_size)
+                    .wait()));
+        }
     }
 }
 catch (sycl::exception const &exc) {
