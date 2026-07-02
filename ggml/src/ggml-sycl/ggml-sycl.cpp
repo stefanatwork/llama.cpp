@@ -3873,11 +3873,7 @@ static bool reorder_qw_q8_0(uint8_t * data_device, const int ncols, const int nr
     }
     uint8_t * tmp_buf = static_cast<uint8_t *>(tmp.ptr);
 
-    sycl::event copy_event;
-    SYCL_CHECK(CHECK_TRY_ERROR(copy_event = stream->memcpy(tmp_buf, data_device, size)));
-    if (!g_ggml_sycl_use_async_mem_op) {
-        copy_event.wait();
-    }
+    SYCL_CHECK(CHECK_TRY_ERROR(stream->memcpy(tmp_buf, data_device, size)));
 
     GGML_ASSERT((size % sizeof(block_q8_0) == 0));
     GGML_ASSERT((offset % sizeof(block_q8_0) == 0));
