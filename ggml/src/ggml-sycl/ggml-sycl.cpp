@@ -664,10 +664,10 @@ static void ggml_backend_sycl_buffer_get_tensor(ggml_backend_buffer_t buffer,
     }
 
     ggml_sycl_set_device(ctx->device);
-    auto stream = dpct::dev_mgr::instance().get_device(ctx->device).default_queue();
+    const queue_ptr stream = ctx->stream;
 
     SYCL_CHECK(CHECK_TRY_ERROR(
-        stream.memcpy(data, (const char *)tensor->data + offset, size)
+        stream->memcpy(data, (const char *)tensor->data + offset, size)
             .wait()));
 }
 catch (sycl::exception const &exc) {
