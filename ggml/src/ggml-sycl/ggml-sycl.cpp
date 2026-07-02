@@ -586,7 +586,7 @@ ggml_backend_sycl_buffer_init_tensor(ggml_backend_buffer_t buffer,
         if (padded_size > original_size && tensor->view_src == nullptr) {
             SYCL_CHECK(CHECK_TRY_ERROR(ctx->stream->memset(
                 (char *)tensor->data + original_size, 0,
-                padded_size - original_size).wait()));
+                padded_size - original_size)));
         }
     }
     return GGML_STATUS_SUCCESS;
