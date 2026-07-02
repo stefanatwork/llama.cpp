@@ -6297,8 +6297,7 @@ bool ggml_backend_sycl_comm_allreduce_tensor(void * comm_ctx_v, struct ggml_tens
     // Phase B: COMM-D2D-FIX-BF16 cross-device copy of compressed bytes via
     // dev2dev_memcpy (separate SYCL contexts; sync copy after compress).
     const size_t bf16_bytes = nelem * sizeof(uint16_t);
-    c0.wait();
-    c1.wait();
+    sycl::event::wait({c0, c1});
     dev2dev_memcpy(ctx0->device, *q0, ctx1->device, *q1, inbox0, outbox1, bf16_bytes);
     dev2dev_memcpy(ctx1->device, *q1, ctx0->device, *q0, inbox1, outbox0, bf16_bytes);
 
