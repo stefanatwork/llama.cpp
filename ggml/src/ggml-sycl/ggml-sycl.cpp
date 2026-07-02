@@ -782,12 +782,15 @@ ggml_backend_sycl_buffer_cpy_tensor(ggml_backend_buffer_t buffer,
         */
         SYCL_CHECK(CHECK_TRY_ERROR(src_ctx->stream->wait_and_throw()));
         ggml_sycl_set_device(dst_ctx->device);
+        const bool same_stream = src_ctx->stream == dst_ctx->stream;
         /*
         DPCT1009:199: SYCL uses exceptions to report errors and does not use the
         error codes. The original code was commented out and a warning string
         was inserted. You need to rewrite this code.
         */
-        SYCL_CHECK(CHECK_TRY_ERROR(dst_ctx->stream->wait_and_throw()));
+        if (!same_stream) {
+            SYCL_CHECK(CHECK_TRY_ERROR(dst_ctx->stream->wait_and_throw()));
+        }
         /*
         DPCT1009:200: SYCL uses exceptions to report errors and does not use the
         error codes. The original code was commented out and a warning string
