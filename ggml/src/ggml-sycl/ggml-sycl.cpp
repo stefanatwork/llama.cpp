@@ -829,7 +829,6 @@ static void ggml_backend_sycl_buffer_clear(ggml_backend_buffer_t buffer,
 
     ggml_sycl_set_device(ctx->device);
     queue_ptr stream = ctx->stream;
-    SYCL_CHECK(CHECK_TRY_ERROR(stream->wait_and_throw()));
 
     constexpr size_t MAX_CHUNK = 2ULL << 30;  // 2 GiB
     for (size_t off = 0; off < buffer->size; off += MAX_CHUNK) {
