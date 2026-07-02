@@ -742,11 +742,24 @@ ggml_backend_sycl_buffer_cpy_tensor(ggml_backend_buffer_t buffer,
         size_t size = ggml_nbytes(src);
 
         if (src_ctx->is_host_visible() && dst_ctx->is_host_visible()) {
-            ggml_sycl_set_device(src_ctx->device);
-            SYCL_CHECK(CHECK_TRY_ERROR(src_ctx->stream->wait_and_throw()));
-            ggml_sycl_set_device(dst_ctx->device);
-            SYCL_CHECK(CHECK_TRY_ERROR(dst_ctx->stream->wait_and_throw()));
-            memcpy(dst->data, src->data, size);
+            const bool same_device = src_ctx->device == dst_ctx->device;
+            const bool use_cpu_copy =
+                !same_device ||
+                g_ggml_sycl_shared_usm_cpu_copy_max <= 0 ||
+                size <= (size_t) g_ggml_sycl_shared_usm_cpu_copy_max;
+
+            if (use_cpu_copy) {
+                ggml_sycl_set_device(src_ctx->device);
+                SYCL_CHECK(CHECK_TRY_ERROR(src_ctx->stream->wait_and_throw()));
+                if (!same_device) {
+                    ggml_sycl_set_device(dst_ctx->device);
+                    SYCL_CHECK(CHECK_TRY_ERROR(dst_ctx->stream->wait_and_throw()));
+                }
+                memcpy(dst->data, src->data, size);
+            } else {
+                ggml_sycl_set_device(dst_ctx->device);
+                SYCL_CHECK(CHECK_TRY_ERROR(dst_ctx->stream->memcpy(dst->data, src->data, size).wait()));
+            }
             return true;
         }
 
