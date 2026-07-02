@@ -4037,11 +4037,7 @@ static bool reorder_qw_q6_k_moe(uint8_t * data_device, size_t expert_bytes, int6
     }
     uint8_t * tmp_buf = static_cast<uint8_t *>(tmp.ptr);
 
-    sycl::event copy_event;
-    SYCL_CHECK(CHECK_TRY_ERROR(copy_event = stream->memcpy(tmp_buf, data_device, total_bytes)));
-    if (!g_ggml_sycl_use_async_mem_op) {
-        copy_event.wait();
-    }
+    SYCL_CHECK(CHECK_TRY_ERROR(stream->memcpy(tmp_buf, data_device, total_bytes)));
 
     const int total_blocks = blocks_per_expert * (int) n_expert;
     auto reorder_event = stream->parallel_for(total_blocks, [=](auto gb_) {
