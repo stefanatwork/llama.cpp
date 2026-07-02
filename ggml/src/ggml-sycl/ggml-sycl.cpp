@@ -840,13 +840,17 @@ static void ggml_backend_sycl_buffer_clear(ggml_backend_buffer_t buffer,
     queue_ptr stream = ctx->stream;
 
     constexpr size_t MAX_CHUNK = 2ULL << 30;  // 2 GiB
+    sycl::event last_event;
     for (size_t off = 0; off < buffer->size; off += MAX_CHUNK) {
         size_t chunk = std::min(buffer->size - off, MAX_CHUNK);
         SYCL_CHECK(CHECK_TRY_ERROR(
-            (*stream)
+            last_event = (*stream)
                 .memset(static_cast<char*>(ctx->dev_ptr) + off, value, chunk)
-                .wait()
         ));
+    }
+
+    if (buffer->size > 0) {
+        SYCL_CHECK(CHECK_TRY_ERROR(last_event.wait_and_throw()));
     }
 }
 catch (sycl::exception const &exc) {
