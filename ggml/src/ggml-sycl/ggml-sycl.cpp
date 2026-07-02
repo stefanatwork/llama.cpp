@@ -1327,7 +1327,7 @@ ggml_backend_sycl_split_buffer_set_tensor(ggml_backend_buffer_t buffer,
             original_size <= (size_t) g_ggml_sycl_shared_usm_cpu_copy_max;
 
         if (use_cpu_copy) {
-            SYCL_CHECK(CHECK_TRY_ERROR(stream->wait_and_throw()));
+            stream->wait();
             memcpy(extra->data_device[i], buf_host, original_size);
         } else {
             SYCL_CHECK(CHECK_TRY_ERROR(
@@ -1393,7 +1393,7 @@ ggml_backend_sycl_split_buffer_get_tensor(ggml_backend_buffer_t buffer,
             original_size <= (size_t) g_ggml_sycl_shared_usm_cpu_copy_max;
 
         if (use_cpu_copy) {
-            SYCL_CHECK(CHECK_TRY_ERROR(stream->wait_and_throw()));
+            stream->wait();
             memcpy(buf_host, extra->data_device[i], original_size);
         } else {
             SYCL_CHECK(CHECK_TRY_ERROR(
