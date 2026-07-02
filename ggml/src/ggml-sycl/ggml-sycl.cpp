@@ -93,6 +93,7 @@ int g_ggml_sycl_dev2dev_memcpy = DEV2DEV_MEMCPY_SYCL;
 int g_ggml_sycl_usm_system = 0;
 int g_ggml_sycl_use_host_usm = 0;
 int g_ggml_sycl_use_host_usm_auto = 0;
+int g_ggml_sycl_shared_usm_cpu_copy_max = 1024 * 1024;
 
 static ggml_sycl_device_info ggml_sycl_init() {
     ggml_sycl_device_info info = {};
@@ -295,6 +296,8 @@ static void ggml_check_sycl() try {
 #endif
 
         g_ggml_sycl_usm_system = ggml_sycl_get_env("GGML_SYCL_USM_SYSTEM", 0);
+        g_ggml_sycl_shared_usm_cpu_copy_max =
+            ggml_sycl_get_env("GGML_SYCL_SHARED_USM_CPU_COPY_MAX", 1024 * 1024);
 
         const char * host_usm_env = getenv("GGML_SYCL_USE_HOST_USM");
         if (host_usm_env != nullptr) {
@@ -386,6 +389,7 @@ static void ggml_check_sycl() try {
 
         GGML_LOG_INFO("  GGML_SYCL_USM_SYSTEM: %d\n", g_ggml_sycl_usm_system);
         GGML_LOG_INFO("  GGML_SYCL_USE_HOST_USM: %d\n", g_ggml_sycl_use_host_usm);
+        GGML_LOG_INFO("  GGML_SYCL_SHARED_USM_CPU_COPY_MAX: %d\n", g_ggml_sycl_shared_usm_cpu_copy_max);
         if (g_ggml_sycl_use_host_usm_auto) {
             GGML_LOG_INFO("  GGML_SYCL_USE_HOST_USM: auto-enabled for integrated/shared-memory GPU\n");
         }
@@ -1285,7 +1289,12 @@ ggml_backend_sycl_split_buffer_set_tensor(ggml_backend_buffer_t buffer,
         */
         ggml_sycl_set_device(i);
         const queue_ptr stream = ctx->streams[i];
-        if (extra->data_alloc_kind[i] == ggml_tensor_extra_gpu::alloc_kind::shared_usm) {
+        const bool use_cpu_copy =
+            extra->data_alloc_kind[i] == ggml_tensor_extra_gpu::alloc_kind::shared_usm &&
+            g_ggml_sycl_shared_usm_cpu_copy_max > 0 &&
+            original_size <= (size_t) g_ggml_sycl_shared_usm_cpu_copy_max;
+
+        if (use_cpu_copy) {
             SYCL_CHECK(CHECK_TRY_ERROR(stream->wait_and_throw()));
             memcpy(extra->data_device[i], buf_host, original_size);
         } else {
@@ -1346,7 +1355,12 @@ ggml_backend_sycl_split_buffer_get_tensor(ggml_backend_buffer_t buffer,
         */
         ggml_sycl_set_device(i);
         const queue_ptr stream = ctx->streams[i];
-        if (extra->data_alloc_kind[i] == ggml_tensor_extra_gpu::alloc_kind::shared_usm) {
+        const bool use_cpu_copy =
+            extra->data_alloc_kind[i] == ggml_tensor_extra_gpu::alloc_kind::shared_usm &&
+            g_ggml_sycl_shared_usm_cpu_copy_max > 0 &&
+            original_size <= (size_t) g_ggml_sycl_shared_usm_cpu_copy_max;
+
+        if (use_cpu_copy) {
             SYCL_CHECK(CHECK_TRY_ERROR(stream->wait_and_throw()));
             memcpy(buf_host, extra->data_device[i], original_size);
         } else {
