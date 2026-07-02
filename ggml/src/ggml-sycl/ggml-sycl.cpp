@@ -864,8 +864,7 @@ static void ggml_backend_sycl_buffer_memset_tensor(ggml_backend_buffer_t buffer,
         GGML_ABORT("Error: Tensor data pointer is null.\n");
     }
     void * target_ptr = static_cast<char *>(tensor->data) + offset;
-    SYCL_CHECK(CHECK_TRY_ERROR((*stream).memset(target_ptr, value, size)));
-    SYCL_CHECK(CHECK_TRY_ERROR((*stream).wait()));
+    SYCL_CHECK(CHECK_TRY_ERROR((*stream).memset(target_ptr, value, size).wait()));
 }
 
 static void ggml_backend_sycl_buffer_reset(ggml_backend_buffer_t buffer) {
