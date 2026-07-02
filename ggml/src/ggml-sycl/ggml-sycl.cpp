@@ -721,7 +721,11 @@ static void dev2dev_memcpy(int device_dst, sycl::queue &q_dst, int device_src, s
     // Host-staged copy
     GGML_SYCL_DEBUG("[SYCL] dev2dev memcpy by host forward\n");
     char *host_buf = (char *)malloc(size);
-    q_src.memcpy(host_buf, (const char *)ptr_src, size).wait();
+    if (&q_src == &q_dst) {
+        q_dst.memcpy(host_buf, (const char *)ptr_src, size).wait();
+    } else {
+        q_src.memcpy(host_buf, (const char *)ptr_src, size).wait();
+    }
     q_dst.memcpy((char *)ptr_dst, host_buf, size).wait();
     free(host_buf);
 }
