@@ -765,14 +765,12 @@ ggml_backend_sycl_buffer_cpy_tensor(ggml_backend_buffer_t buffer,
 
         if (src_ctx->is_host_visible() && !dst_ctx->is_host_visible()) {
             ggml_sycl_set_device(dst_ctx->device);
-            SYCL_CHECK(CHECK_TRY_ERROR(dst_ctx->stream->wait_and_throw()));
             SYCL_CHECK(CHECK_TRY_ERROR(dst_ctx->stream->memcpy(dst->data, src->data, size).wait()));
             return true;
         }
 
         if (!src_ctx->is_host_visible() && dst_ctx->is_host_visible()) {
             ggml_sycl_set_device(src_ctx->device);
-            SYCL_CHECK(CHECK_TRY_ERROR(src_ctx->stream->wait_and_throw()));
             SYCL_CHECK(CHECK_TRY_ERROR(src_ctx->stream->memcpy(dst->data, src->data, size).wait()));
             return true;
         }
