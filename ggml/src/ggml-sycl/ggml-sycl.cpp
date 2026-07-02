@@ -607,8 +607,16 @@ static void ggml_backend_sycl_buffer_set_tensor(ggml_backend_buffer_t buffer,
     ggml_backend_sycl_buffer_context * ctx = ( ggml_backend_sycl_buffer_context *)buffer->context;
     if (ctx->is_host_visible()) {
         ggml_sycl_set_device(ctx->device);
-        SYCL_CHECK(CHECK_TRY_ERROR(ctx->stream->wait_and_throw()));
-        memcpy((char *) tensor->data + offset, data, size);
+        const bool use_cpu_copy =
+            g_ggml_sycl_shared_usm_cpu_copy_max > 0 &&
+            size <= (size_t) g_ggml_sycl_shared_usm_cpu_copy_max;
+
+        if (use_cpu_copy) {
+            SYCL_CHECK(CHECK_TRY_ERROR(ctx->stream->wait_and_throw()));
+            memcpy((char *) tensor->data + offset, data, size);
+        } else {
+            SYCL_CHECK(CHECK_TRY_ERROR(ctx->stream->memcpy((char *) tensor->data + offset, data, size).wait()));
+        }
         return;
     }
     ggml_sycl_set_device(ctx->device);
@@ -642,8 +650,17 @@ static void ggml_backend_sycl_buffer_get_tensor(ggml_backend_buffer_t buffer,
 
     if (ctx->is_host_visible()) {
         ggml_sycl_set_device(ctx->device);
-        SYCL_CHECK(CHECK_TRY_ERROR(ctx->stream->wait_and_throw()));
-        memcpy(data, (const char *)tensor->data + offset, size);
+        const bool use_cpu_copy =
+            g_ggml_sycl_shared_usm_cpu_copy_max > 0 &&
+            size <= (size_t) g_ggml_sycl_shared_usm_cpu_copy_max;
+
+        if (use_cpu_copy) {
+            SYCL_CHECK(CHECK_TRY_ERROR(ctx->stream->wait_and_throw()));
+            memcpy(data, (const char *)tensor->data + offset, size);
+        } else {
+            SYCL_CHECK(CHECK_TRY_ERROR(
+                ctx->stream->memcpy(data, (const char *)tensor->data + offset, size).wait()));
+        }
         return;
     }
 
